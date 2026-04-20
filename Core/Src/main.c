@@ -2,20 +2,18 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
+  * @brief          : Programa principal
   *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
+  * Esse código lê temperatura do sensor BMP180 via I2C (usando DMA),
+  * aplica uma máquina de estados baseada na temperatura e controla:
+  *  - PWM (velocidade de um cooler, por exemplo)
+  *  - LEDs indicadores de estado
+  *  - Envia dados via UART
   *
   ******************************************************************************
   */
 /* USER CODE END Header */
+
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "dma.h"
@@ -24,111 +22,93 @@
 #include "usart.h"
 #include "gpio.h"
 
-/* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "bmp180.h"
-#include <stdio.h>
-#include <string.h>
-
-
+#include "bmp180.h"   // Driver do sensor BMP180
+#include <stdio.h>    // Para printf / snprintf
+#include <string.h>   // Manipulação de strings
 /* USER CODE END Includes */
 
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
-
-/* USER CODE END PTD */
-
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-
-/* USER CODE END PD */
-
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-
-/* USER CODE END PM */
-
-/* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+
+/**
+ * Máquina de estados baseada na temperatura
+ */
 typedef enum {
-    ESTADO_MINIMO = 0,
-    ESTADO_MEDIO,
-    ESTADO_RAPIDO
+    ESTADO_MINIMO = 0,   // Temperatura baixa → PWM desligado
+    ESTADO_MEDIO,        // Temperatura média → PWM intermediário
+    ESTADO_RAPIDO        // Temperatura alta → PWM máximo
 } EstadoTemperatura;
 
-EstadoTemperatura estado_atual = ESTADO_MINIMO;
-EstadoTemperatura proximo_estado = ESTADO_MINIMO;
-BMP180_HandleTypedef bmp;
-float temperatura;
-char msg[50];
-volatile uint8_t bmp_ready = 0;
+EstadoTemperatura estado_atual = ESTADO_MINIMO;   // Estado atual
+EstadoTemperatura proximo_estado = ESTADO_MINIMO; // Próximo estado
+
+BMP180_HandleTypedef bmp;  // Estrutura do sensor BMP180
+float temperatura;         // Variável para armazenar temperatura lida
+
+char msg[50];              // Buffer para mensagem UART
+
+volatile uint8_t bmp_ready = 0; // Flag de controle (não usada aqui diretamente)
+
 /* USER CODE END PV */
 
-/* Private function prototypes -----------------------------------------------*/
-void SystemClock_Config(void);
-/* USER CODE BEGIN PFP */
 
-/* USER CODE END PFP */
-
-/* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void SystemClock_Config(void);
+/**
+ * Redireciona printf para UART1
+ * Assim você pode usar printf() normalmente
+ */
 int _write(int file, char *ptr, int len)
 {
     HAL_UART_Transmit(&huart1, (uint8_t*)ptr, len, HAL_MAX_DELAY);
     return len;
 }
 
-
 /* USER CODE END 0 */
 
+
 /**
-  * @brief  The application entry point.
-  * @retval int
+  * @brief  Função principal
   */
 int main(void)
 {
-
-  /* USER CODE BEGIN 1 */
-
-  /* USER CODE END 1 */
-
-  /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  /* Inicialização básica da HAL */
   HAL_Init();
 
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
-
-  /* Configure the system clock */
+  /* Configuração do clock */
   SystemClock_Config();
 
-  /* USER CODE BEGIN SysInit */
+  /* Inicialização dos periféricos */
+  MX_GPIO_Init();        // GPIO (LEDs etc.)
+  MX_DMA_Init();         // DMA
+  MX_I2C1_Init();        // I2C (BMP180)
+  MX_USART1_UART_Init(); // UART
+  MX_TIM1_Init();        // Timer (PWM)
 
-  /* USER CODE END SysInit */
-
-  /* Initialize all configured peripherals */
-  MX_GPIO_Init();
-  MX_DMA_Init();
-  MX_I2C1_Init();
-  MX_USART1_UART_Init();
-  MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
+
+  // Inicializa o sensor BMP180
   BMP180_Init(&bmp, &hi2c1);
+
+  // Inicia PWM no canal 1 do TIM1
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+
+  // Habilita saída PWM (necessário para TIM1 - advanced timer)
   __HAL_TIM_MOE_ENABLE(&htim1);
+
   /* USER CODE END 2 */
 
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
- while (1)
-{
-    // --- Leitura da temperatura ---
+  /* Loop infinito */
+  while (1)
+  {
+    // --- Leitura da temperatura via DMA ---
     if (BMP180_ReadTemperature_DMA(&bmp, &temperatura) == HAL_OK)
     {
-        // --- TRANSIÇÃO DE ESTADO ---
+        /**
+         * TRANSIÇÃO DE ESTADO
+         * Define o próximo estado baseado na temperatura
+         */
         if (temperatura < 26.0)
         {
             proximo_estado = ESTADO_MINIMO;
@@ -142,56 +122,72 @@ int main(void)
             proximo_estado = ESTADO_RAPIDO;
         }
 
+        // Atualiza estado atual
         estado_atual = proximo_estado;
 
-        uint32_t pwm_atual = 0;
+        uint32_t pwm_atual = 0; // Duty cycle atual
 
-        // --- AÇÕES ---
+        /**
+         * AÇÕES DE CADA ESTADO
+         */
         switch (estado_atual)
         {
             case ESTADO_MINIMO:
-                pwm_atual = 0;
+                pwm_atual = 0; // PWM desligado
 
+                // LED verde ON
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET);
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_RESET);
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET);
                 break;
 
             case ESTADO_MEDIO:
-                pwm_atual = 500;
+                pwm_atual = 500; // ~50% duty cycle
 
+                // LED amarelo ON
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_SET);
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET);
                 break;
 
             case ESTADO_RAPIDO:
-                pwm_atual = 999;
+                pwm_atual = 999; // ~100% duty cycle
 
+                // LED vermelho ON
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_RESET);
                 HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_SET);
                 break;
         }
 
-        // Aplica PWM
+        // Atualiza valor do PWM no timer
         __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, pwm_atual);
 
-        // --- PRINT ---
+        /**
+         * FORMATAÇÃO DA TEMPERATURA
+         * Separa parte inteira e decimal
+         */
         int32_t p_int = (int32_t)temperatura;
         int32_t p_dec = (int32_t)((temperatura - p_int) * 100);
-        if (p_dec < 0) p_dec *= -1;
 
+        if (p_dec < 0) p_dec *= -1; // Corrige decimal negativo
+
+        /**
+         * Monta string para envio via UART
+         */
         int len = snprintf(msg, sizeof(msg),
                           "Temp: %ld.%02ld C | PWM: %lu\r\n",
                           p_int, p_dec, pwm_atual);
 
+        // Envia mensagem via UART
         HAL_UART_Transmit(&huart1, (uint8_t*)msg, len, HAL_MAX_DELAY);
     }
 
+    // Delay entre leituras
     HAL_Delay(500);
-} 
+  }
 }
+
 /**
   * @brief System Clock Configuration
   * @retval None
